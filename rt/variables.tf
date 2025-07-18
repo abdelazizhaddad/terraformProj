@@ -8,11 +8,6 @@ variable "vpc_id" {
   type        = string
 }
 
-variable "subnet_ids" {
-  description = "List of subnet IDs to associate"
-  type        = list(string)
-  default     = []
-}
 
 variable "default_route_gateway_id" {
   description = "ID of the gateway to use for 0.0.0.0/0 route"

@@ -1,21 +1,21 @@
-resource "aws_lb" "alb" {
+
+
+resource "aws_lb" "this" {
   name               = var.name
   internal           = var.internal
   load_balancer_type = "application"
-  subnets            = var.subnets
   security_groups    = var.security_groups
-  enable_deletion_protection = var.enable_deletion_protection
-
-  tags = var.tags
+  subnets            = var.subnets
 }
 
-resource "aws_lb_target_group" "alb" {
+resource "aws_lb_target_group" "this" {
   name     = "${var.name}-tg"
-  port     = var.target_port
-  protocol = var.target_protocol
+  port     = 80
+  protocol = "HTTP"
   vpc_id   = var.vpc_id
+  target_type = "instance"
 
-  health_check {
+   health_check {
     path                = var.health_check_path
     interval            = 30
     timeout             = 5
@@ -23,8 +23,6 @@ resource "aws_lb_target_group" "alb" {
     unhealthy_threshold = 2
     matcher             = "200-399"
   }
-
-  tags = var.tags
 }
 
 resource "aws_lb_listener" "http" {
@@ -36,5 +34,4 @@ resource "aws_lb_listener" "http" {
     type             = "forward"
     target_group_arn = aws_lb_target_group.this.arn
   }
-
 }

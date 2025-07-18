@@ -60,23 +60,43 @@ module "ngw" {
   public_subnet_id = module.public_subnet_a.subnet_id
 }
 
-#create route table for public instamces
+#public_rt
 module "public_rt" {
   source = "./rt"
-  name = "public_rt"
+  name   = "public_rt"
   vpc_id = module.main_vpc.vpc_id
-  subnet_ids = [ module.public_subnet_a.subnet_id , module.public_subnet_b.subnet_id ]
   default_route_gateway_id = module.igw.internet_gateway_id
 }
 
-#create route table for public instamces
+#private_rt
 module "private_rt" {
   source = "./rt"
-  name = "private_rt"
+  name   = "private_rt"
   vpc_id = module.main_vpc.vpc_id
-  subnet_ids = [ module.private_subnet_a.subnet_id , module.private_subnet_b.subnet_id ]
-  default_route_gateway_id  = module.ngw.nat_gateway_id
-  use_internet_gateway      = false
+  default_route_gateway_id = module.ngw.nat_gateway_id
+  use_internet_gateway     = false
+}
+
+# Public subnet associations
+resource "aws_route_table_association" "public_a" {
+  subnet_id      = module.public_subnet_a.subnet_id
+  route_table_id = module.public_rt.route_table_id
+}
+
+resource "aws_route_table_association" "public_b" {
+  subnet_id      = module.public_subnet_b.subnet_id
+  route_table_id = module.public_rt.route_table_id
+}
+
+# Private subnet associations
+resource "aws_route_table_association" "private_a" {
+  subnet_id      = module.private_subnet_a.subnet_id
+  route_table_id = module.private_rt.route_table_id
+}
+
+resource "aws_route_table_association" "private_b" {
+  subnet_id      = module.private_subnet_b.subnet_id
+  route_table_id = module.private_rt.route_table_id
 }
 
 #create security group for public alb
@@ -107,7 +127,7 @@ module "public_alb_sg" {
 #create Application load balancer external
 module "public_alb" {
   source = "./alb"
-  name = "external_alb"
+  name = "external-alb"
   vpc_id = module.main_vpc.vpc_id
   subnets = [module.public_subnet_a.subnet_id , module.public_subnet_b.subnet_id]
   security_groups = [ module.public_alb_sg.security_group_id ]
@@ -150,98 +170,69 @@ module "proxy_sg" {
 module "proxy_server_a" {
   source = "./instance"
   subnet_id = module.public_subnet_a.subnet_id
-  security_group_id = module.proxy_sg.security_group_id
+  security_group_id = [module.proxy_sg.security_group_id]
   name = "proxy_server_a"
   associate_public_ip = true
-  ami_id           = data.aws_ami.amazon_linux_2.id
+  ami_id           = data.aws_ami.amazon_ami.id
+
 }
+
+resource "null_resource" "provisionforproxya" {
+  
+  connection {
+    type        = "ssh"
+    user        = "ec2-user"
+    private_key = file("zizo.pem")
+    host        = module.proxy_server_a.public_ip
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "sudo yum update -y",
+      "sudo amazon-linux-extras enable nginx1",
+      "sudo yum install -y nginx",
+      "sudo systemctl enable nginx",
+      "sudo systemctl start nginx",
+      "sudo bash -c 'cat > /etc/nginx/conf.d/reverse-proxy.conf <<EOT\nserver {\n    listen 80;\n    location / {\n        proxy_pass http://${module.private_alb.lb_dns_name}/;\n        proxy_set_header Host \\$host;\n        proxy_set_header X-Real-IP \\$remote_addr;\n        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto \\$scheme;\n    }\n}\nEOT'",
+      "sudo nginx -t",
+      "sudo systemctl reload nginx"
+    ]
+  }
+}
+
 
 #create proxy server b
 module "proxy_server_b" {
   source = "./instance"
   subnet_id = module.public_subnet_b.subnet_id
-  security_group_id = module.proxy_sg.security_group_id
+  security_group_id = [module.proxy_sg.security_group_id]
   name = "proxy_server_b"
   associate_public_ip = true
-  ami_id           = data.aws_ami.amazon_linux_2.id
+  ami_id           = data.aws_ami.amazon_ami.id
+
+ 
 }
 
-#call nginx conf file 
-data "template_file" "nginx_proxy_config" {
-  template = file("${path.module}/nginx.conf.tpl")
-
-  vars = {
-    private_alb_dns_name = module.private_alb.lb_dns_name
-  }
-}
-
-#proxy installation on proxy server a
-resource "null_resource" "proxy_a_provisioner" {
-  depends_on = [module.proxy_server_a]
-
-  provisioner "file" {
-    content     = data.template_file.nginx_proxy_config.rendered
-    destination = "/tmp/nginx.conf"
-
-    connection {
-      type        = "ssh"
-      user        = "ec2-user"
-      private_key = file("zizo.pem")
-      host        = module.proxy_server_a.public_ip
-    }
+resource "null_resource" "provisionforproxyb" {
+  
+  connection {
+    type        = "ssh"
+    user        = "ec2-user"
+    private_key = file("zizo.pem")
+    host        = module.proxy_server_b.public_ip
   }
 
   provisioner "remote-exec" {
     inline = [
       "sudo yum update -y",
+      "sudo amazon-linux-extras enable nginx1",
       "sudo yum install -y nginx",
       "sudo systemctl enable nginx",
       "sudo systemctl start nginx",
-      "sudo mv /tmp/nginx.conf /etc/nginx/nginx.conf",
-      "sudo systemctl restart nginx"
+      "sudo bash -c 'cat > /etc/nginx/conf.d/reverse-proxy.conf <<EOT\nserver {\n    listen 80;\n    location / {\n        proxy_pass http://${module.private_alb.lb_dns_name}/;\n        proxy_set_header Host \\$host;\n        proxy_set_header X-Real-IP \\$remote_addr;\n        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto \\$scheme;\n    }\n}\nEOT'",
+      "sudo nginx -t",
+      "sudo systemctl reload nginx"
     ]
-
-    connection {
-      type        = "ssh"
-      user        = "ec2-user"
-      private_key = file("zizo.pem")
-      host        = module.proxy_server_a.public_ip
-    }
-  }
-}
-
-#proxy installation on proxy server b
-resource "null_resource" "proxy_b_provisioner" {
-  depends_on = [module.proxy_server_b]
-
-  provisioner "file" {
-    content     = data.template_file.nginx_proxy_config.rendered
-    destination = "/tmp/nginx.conf"
-
-    connection {
-      type        = "ssh"
-      user        = "ec2-user"
-      private_key = file("zizo.pem")
-      host        = module.proxy_server_b.public_ip
-    }
-  }
-
-  provisioner "remote-exec" {
-    inline = [
-      "sudo yum update -y",
-      "sudo yum install -y nginx",
-      "sudo systemctl enable nginx",
-      "sudo systemctl start nginx",
-      "sudo mv /tmp/nginx.conf /etc/nginx/nginx.conf",
-      "sudo systemctl restart nginx"
-    ]
-
-    connection {
-      type        = "ssh"
-      user        = "ec2-user"
-      private_key = file("zizo.pem")
-      host        = module.proxy_server_b.public_ip
-    }
   }
 }
 
@@ -288,7 +279,7 @@ module "private_alb_sg" {
 #create Application load balancer internal
 module "private_alb" {
   source = "./alb"
-  name = "internal_alb"
+  name = "insidealb"
   vpc_id = module.main_vpc.vpc_id
   subnets = [module.private_subnet_a.subnet_id , module.private_subnet_b.subnet_id]
   security_groups = [ module.private_alb_sg.security_group_id ]
@@ -330,21 +321,29 @@ module "web_sg" {
 
 #creating wep server a
 module "web_server_a" {
-  source = "./instance"
+  source = "./web"
   subnet_id = module.private_subnet_a.subnet_id
-  security_group_id = module.web_sg.security_group_id
+  security_group_id = [module.web_sg.security_group_id]
   name = "web_server_a"
-  ami_id           = data.aws_ami.amazon_linux_2.id
+  ami_id           = data.aws_ami.amazon_ami.id
+
+  
 }
+
+
 
 #creating wep server b
 module "web_server_b" {
-  source = "./instance"
+  source = "./web"
   subnet_id = module.private_subnet_b.subnet_id
-  security_group_id = module.web_sg.security_group_id
+  security_group_id = [module.web_sg.security_group_id]
   name = "web_server_b"
-  ami_id           = data.aws_ami.amazon_linux_2.id
+  ami_id           = data.aws_ami.amazon_ami.id
+
+  
 }
+
+
 
 ##private alb attaching to web a
 resource "aws_lb_target_group_attachment" "web_a" {
@@ -360,96 +359,9 @@ resource "aws_lb_target_group_attachment" "web_b" {
   port             = 80
 }
 
-#installing apache on web a
-resource "null_resource" "web_a_provisioner" {
-  depends_on = [module.web_server_a]
-
-  provisioner "file" {
-    source      = "./app/"
-    destination = "/home/ec2-user/app"
-
-    connection {
-      type                = "ssh"
-      user                = "ec2-user"
-      private_key         = file("zizo.pem")
-      host                = module.web_server_a.private_ip
-      bastion_host        = module.proxy_server_a.public_ip
-      bastion_user        = "ec2-user"
-      bastion_private_key = file("zizo.pem")
-    }
-  }
-  provisioner "remote-exec" {
-    inline = [
-      "sudo yum update -y",
-      "sudo yum install -y httpd",
-      "sudo systemctl enable httpd",
-      "sudo systemctl start httpd",
-      "sudo mv /home/ec2-user/app/* /var/www/html/",
-      "sudo chown -R apache:apache /var/www/html",
-      "sudo systemctl restart httpd"
-    ]
-
-    connection {
-      type        = "ssh"
-      user        = "ec2-user"
-      private_key = file("zizo.pem")
-      host        = module.web_server_a.private_ip
-
-      bastion_host        = module.proxy_server_a.public_ip
-      bastion_user        = "ec2-user"
-      bastion_private_key = file("zizo.pem")
-    }
-
-  }
-}
-
-#installing apache on web b
-resource "null_resource" "web_b_provisioner" {
-  depends_on = [module.web_server_b]
-
-  provisioner "file" {
-    source      = "./app/"
-    destination = "/home/ec2-user/app"
-
-    connection {
-      type                = "ssh"
-      user                = "ec2-user"
-      private_key         = file("zizo.pem")
-      host                = module.web_server_b.private_ip
-      bastion_host        = module.proxy_server_a.public_ip
-      bastion_user        = "ec2-user"
-      bastion_private_key = file("zizo.pem")
-    }
-  }
-
-  provisioner "remote-exec" {
-    inline = [
-      "sudo yum update -y",
-      "sudo yum install -y httpd",
-      "sudo systemctl enable httpd",
-      "sudo systemctl start httpd",
-      "sudo mv /home/ec2-user/app/* /var/www/html/",
-      "sudo chown -R apache:apache /var/www/html",
-      "sudo systemctl restart httpd"
-    ]
-
-
-    connection {
-      type        = "ssh"
-      user        = "ec2-user"
-      private_key = file("zizo.pem")
-      host        = module.web_server_b.private_ip
-
-      bastion_host        = module.proxy_server_b.public_ip
-      bastion_user        = "ec2-user"
-      bastion_private_key = file("zizo.pem")
-    }
-
-  }
-}
 
 #storing  IPs locally
-resource "null_resource" "write_all_ips" {
+/* resource "null_resource" "write_all_ips" {
   depends_on = [
     module.proxy_server_a,
     module.proxy_server_b,
@@ -457,8 +369,8 @@ resource "null_resource" "write_all_ips" {
     module.web_server_b,
     module.ngw
   ]
-
-  provisioner "local-exec" {
+   }
+ /* provisioner "local-exec" {
     command = <<EOT
       echo "public-ip1" > all-ips.txt
       echo "${module.proxy_server_a.public_ip}" >> all-ips.txt
@@ -468,9 +380,7 @@ resource "null_resource" "write_all_ips" {
       echo "${module.web_server_a.private_ip}" >> all-ips.txt
       echo "private-ip2" >> all-ips.txt
       echo "${module.web_server_b.private_ip}" >> all-ips.txt
-      echo "nat-gateway-eip" >> all-ips.txt
-      echo "${module.ngw.nat_gateway_eip}" >> all-ips.txt
       EOT
   }
 }
-
+*/
